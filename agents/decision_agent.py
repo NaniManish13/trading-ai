@@ -218,10 +218,25 @@ class DecisionAgent:
             
             return {
                 'total_scanned': scan_results.get('total_scanned', 0),
-                'total_opportunities': len(opportunities),
+                'successful_fetches': scan_results.get('successful_fetches', 0),
+                'failed_fetches': scan_results.get('failed_fetches', 0),
+                'indicator_failures': scan_results.get('indicator_failures', 0),
+                'total_opportunities': scan_results.get('total_opportunities', 0),
                 'top_opportunities': top_opportunities,
                 'errors': scan_results.get('errors', []),
+                'scan_log': scan_results.get('scan_log', []),
+                'timestamp': scan_results.get('timestamp'),
             }
         except Exception as e:
-            logger.error(f"Error getting market opportunities: {e}")
-            return {}
+            logger.exception(f"Error getting market opportunities: {e}")
+            return {
+                'total_scanned': 0,
+                'successful_fetches': 0,
+                'failed_fetches': 0,
+                'indicator_failures': 0,
+                'total_opportunities': 0,
+                'top_opportunities': [],
+                'errors': [{'error': str(e)}],
+                'scan_log': [],
+                'timestamp': None,
+            }

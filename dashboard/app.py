@@ -1,10 +1,25 @@
 """
 Main Streamlit Dashboard for Trading AI Platform
 """
+import sys
+import logging
+from pathlib import Path
+
 import streamlit as st
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
+)
+
+# Ensure project root is on sys.path for local package imports
+ROOT_DIR = Path(__file__).resolve().parents[1]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
 from config.settings import (
     STARTING_CAPITAL, NIFTY_50_STOCKS, STREAMLIT_PAGE_CONFIG,
     STREAMLIT_THEME
@@ -124,12 +139,41 @@ elif page == "🔍 Market Scanner":
     if 'scan_results' in st.session_state:
         results = st.session_state.scan_results
         
-        st.metric("Total Opportunities", results.get('total_opportunities', 0))
-        
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.metric("Total Symbols", results.get('total_scanned', 0))
+        with col2:
+            st.metric("Successful Fetches", results.get('successful_fetches', 0))
+        with col3:
+            st.metric("Failed Fetches", results.get('failed_fetches', 0))
+        with col4:
+            st.metric("Opportunities Found", results.get('total_opportunities', 0))
+
+        st.divider()
         if results.get('top_opportunities'):
             st.subheader("Top Opportunities")
             df = pd.DataFrame(results['top_opportunities'])
             st.dataframe(df, use_container_width=True)
+
+        with st.expander("Diagnostics", expanded=True):
+            st.write("**Scan timestamp:**", results.get('timestamp'))
+            st.write("**Indicator failures:**", results.get('indicator_failures', 0))
+            if results.get('scan_log'):
+                scan_df = pd.DataFrame(results['scan_log'])
+                display_cols = [
+                    'symbol', 'rows_fetched', 'current_price', 'rsi', 'ema20', 'ema50',
+                    'macd', 'technical_signal', 'status', 'fetch_reason', 'indicator_reason', 'error'
+                ]
+                available_cols = [col for col in display_cols if col in scan_df.columns]
+                st.dataframe(scan_df[available_cols], use_container_width=True)
+
+            if results.get('errors'):
+                st.markdown("### Errors")
+                for err in results['errors']:
+                    if isinstance(err, dict):
+                        st.error(f"{err.get('symbol', 'Unknown')}: {err.get('error')}")
+                    else:
+                        st.error(str(err))
 
 
 # Page: Technical Analysis

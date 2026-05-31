@@ -1,70 +1,146 @@
 """
-Market data service using yfinance
+Market data service using yfinance with caching and batch downloading.
 """
 import logging
 import pandas as pd
 import yfinance as yf
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
 
 class MarketDataService:
-    """Fetch and manage market data"""
-    
+    """Fetch and manage market data with caching."""
+
+    HISTORY_TTL_SECONDS = 900  # 15 minutes
+    BATCH_SIZE = 50
+    DEFAULT_TIMEOUT = 15
+    MAX_RETRIES = 3
+
+    _history_cache: Dict[Tuple[str, str, str], Tuple[datetime, pd.DataFrame]] = {}
+
     @staticmethod
-    def get_ohlcv(
-        symbol: str, 
-        period: str = "1y", 
-        interval: str = "1d"
-    ) -> pd.DataFrame:
-        """
-        Fetch OHLCV data for a symbol
+    def _cache_get(cache: Dict, key: Tuple, ttl: int):
+        cached = cache.get(key)
+        if not cached:
+            return None
+        timestamp, value = cached
+        if datetime.utcnow() - timestamp > timedelta(seconds=ttl):
+            cache.pop(key, None)
+            return None
+        return value
+
+    @staticmethod
+    def _cache_set(cache: Dict, key: Tuple, value, ttl: int):
+        cache[key] = (datetime.utcnow(), value)
+
+    @staticmethod
+    def get_ohlcv(symbol: str, period: str = "1y", interval: str = "1d") -> pd.DataFrame:
+        """Fetch OHLCV data for a single symbol with caching."""
+        symbol = symbol.strip().upper()
+        cache_key = (symbol, period, interval)
+        cached = MarketDataService._cache_get(MarketDataService._history_cache, cache_key, MarketDataService.HISTORY_TTL_SECONDS)
+        if cached is not None:
+            return cached.copy()
+
+        for attempt in range(1, MarketDataService.MAX_RETRIES + 1):
+            try:
+                data = yf.download(
+                    symbol,
+                    period=period,
+                    interval=interval,
+                    progress=False,
+                    timeout=MarketDataService.DEFAULT_TIMEOUT,
+                    threads=False,
+                )
+                if data.empty:
+                    raise ValueError(f"No OHLCV data for {symbol}")
+                data = data.rename(columns={
+                    'Open': 'open',
+                    'High': 'high',
+                    'Low': 'low',
+                    'Close': 'close',
+                    'Volume': 'volume'
+                })
+                MarketDataService._cache_set(MarketDataService._history_cache, cache_key, data, MarketDataService.HISTORY_TTL_SECONDS)
+                return data
+            except Exception as exc:
+                logger.warning(f"Attempt {attempt}/{MarketDataService.MAX_RETRIES} failed for {symbol}: {exc}")
+                if attempt == MarketDataService.MAX_RETRIES:
+                    logger.error(f"get_ohlcv failed for {symbol}: {exc}")
+                    return pd.DataFrame()
+
+        return pd.DataFrame()
+
+    @staticmethod
+    def get_ohlcv_batch(symbols: List[str], period: str = "6mo", interval: str = "1d") -> Dict[str, pd.DataFrame]:
+        """Fetch OHLCV data for a list of symbols using batch downloads."""
+        results: Dict[str, pd.DataFrame] = {}
+        symbols = [sym.strip().upper() for sym in symbols if sym]
         
-        Args:
-            symbol: Stock ticker
-            period: Data period (1d, 5d, 1mo, 3mo, 6mo, 1y, 2y, 5y, 10y, ytd, max)
-            interval: Data interval (1m, 5m, 15m, 30m, 60m, 1d, 1wk, 1mo)
-        
-        Returns:
-            DataFrame with OHLCV data
-        """
-        try:
-            data = yf.download(symbol, period=period, interval=interval, progress=False)
-            if data.empty:
-                logger.warning(f"No data found for {symbol}")
-                return pd.DataFrame()
-            
-            data = data.rename(columns={
-                'Open': 'open',
-                'High': 'high',
-                'Low': 'low',
-                'Close': 'close',
-                'Volume': 'volume'
-            })
-            
-            return data
-        except Exception as e:
-            logger.error(f"Error fetching data for {symbol}: {e}")
-            return pd.DataFrame()
-    
+        for batch_start in range(0, len(symbols), MarketDataService.BATCH_SIZE):
+            batch = symbols[batch_start:batch_start + MarketDataService.BATCH_SIZE]
+            try:
+                logger.info(f"Batch downloading {len(batch)} symbols")
+                data = yf.download(
+                    tickers=batch,
+                    period=period,
+                    interval=interval,
+                    group_by='ticker',
+                    progress=False,
+                    timeout=MarketDataService.DEFAULT_TIMEOUT,
+                    threads=True,
+                )
+                if data.empty:
+                    raise ValueError("Batch download returned empty data")
+
+                for symbol in batch:
+                    cache_key = (symbol, period, interval)
+                    if isinstance(data.columns, pd.MultiIndex):
+                        try:
+                            df = data[symbol].copy()
+                        except KeyError:
+                            df = pd.DataFrame()
+                    else:
+                        df = data.copy()
+                    if not df.empty:
+                        df = df.rename(columns={
+                            'Open': 'open',
+                            'High': 'high',
+                            'Low': 'low',
+                            'Close': 'close',
+                            'Volume': 'volume'
+                        })
+                        MarketDataService._cache_set(MarketDataService._history_cache, cache_key, df, MarketDataService.HISTORY_TTL_SECONDS)
+                        results[symbol] = df
+                    else:
+                        results[symbol] = pd.DataFrame()
+            except Exception as exc:
+                logger.warning(f"Batch download failed for {batch}: {exc}")
+                for symbol in batch:
+                    results[symbol] = MarketDataService.get_ohlcv(symbol, period=period, interval=interval)
+
+        return results
+
     @staticmethod
     def get_current_price(symbol: str) -> Optional[float]:
-        """Get current price for a symbol"""
+        """Get current price for a symbol."""
+        symbol = symbol.strip().upper()
         try:
             ticker = yf.Ticker(symbol)
-            price = ticker.info.get('currentPrice') or ticker.info.get('regularMarketPrice')
-            return price
+            info = ticker.fast_info if hasattr(ticker, 'fast_info') else ticker.info
+            price = info.get('last_price') or info.get('currentPrice') or info.get('regularMarketPrice')
+            return float(price) if price else None
         except Exception as e:
             logger.error(f"Error getting current price for {symbol}: {e}")
             return None
-    
+
     @staticmethod
     def get_intraday_data(symbol: str, interval: str = "5m") -> pd.DataFrame:
-        """Get intraday data"""
+        """Get intraday data."""
         try:
-            data = yf.download(symbol, period="1d", interval=interval, progress=False)
+            data = yf.download(symbol, period="1d", interval=interval, progress=False, timeout=MarketDataService.DEFAULT_TIMEOUT)
             if data.empty:
                 logger.warning(f"No intraday data for {symbol}")
                 return pd.DataFrame()
@@ -72,53 +148,30 @@ class MarketDataService:
         except Exception as e:
             logger.error(f"Error fetching intraday data: {e}")
             return pd.DataFrame()
-    
-    @staticmethod
-    def get_multiple_ohlcv(
-        symbols: List[str], 
-        period: str = "1y"
-    ) -> Dict[str, pd.DataFrame]:
-        """Fetch OHLCV for multiple symbols"""
-        results = {}
-        for symbol in symbols:
-            results[symbol] = MarketDataService.get_ohlcv(symbol, period)
-        return results
-    
+
     @staticmethod
     def get_volume_profile(symbol: str, days: int = 20) -> Dict:
-        """Analyze volume profile"""
+        """Analyze volume profile for a symbol."""
         try:
-            end_date = datetime.now()
-            start_date = end_date - timedelta(days=days)
-            data = yf.download(
-                symbol, 
-                start=start_date, 
-                end=end_date, 
-                progress=False
-            )
-            
-            if data.empty:
+            data = MarketDataService.get_ohlcv(symbol, period=f"{days}d")
+            if data.empty or 'volume' not in data.columns:
                 return {}
-            
-            avg_volume = data['Volume'].mean()
-            max_volume = data['Volume'].max()
-            current_volume = data['Volume'].iloc[-1]
-            volume_ratio = current_volume / avg_volume if avg_volume > 0 else 0
-            
+            avg_volume = data['volume'].mean()
+            current_volume = data['volume'].iloc[-1]
+            volume_ratio = float(current_volume / avg_volume) if avg_volume and avg_volume > 0 else 0
             return {
-                'avg_volume': avg_volume,
-                'max_volume': max_volume,
-                'current_volume': current_volume,
+                'avg_volume': float(avg_volume),
+                'current_volume': float(current_volume),
                 'volume_ratio': volume_ratio,
                 'is_breakout': volume_ratio > 1.5
             }
         except Exception as e:
-            logger.error(f"Error analyzing volume: {e}")
+            logger.error(f"Error analyzing volume for {symbol}: {e}")
             return {}
-    
+
     @staticmethod
     def get_52week_high_low(symbol: str) -> Dict:
-        """Get 52-week high and low"""
+        """Get 52-week high and low values."""
         try:
             ticker = yf.Ticker(symbol)
             info = ticker.info
