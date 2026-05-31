@@ -1,0 +1,35 @@
+version: '3.8'
+
+services:
+  trading-ai:
+    build: .
+    container_name: trading-ai-platform
+    ports:
+      - "8501:8501"  # Streamlit
+      - "8000:8000"  # FastAPI
+    volumes:
+      - ./:/app
+      - ./logs:/app/logs
+      - ./database:/app/database
+    environment:
+      - PYTHONUNBUFFERED=1
+      - STREAMLIT_SERVER_HEADLESS=true
+    env_file:
+      - .env
+    command: streamlit run dashboard/app.py --server.port=8501 --server.address=0.0.0.0
+
+  # Optional: PostgreSQL for production
+  # postgres:
+  #   image: postgres:15-alpine
+  #   container_name: trading-ai-db
+  #   environment:
+  #     POSTGRES_USER: trading_user
+  #     POSTGRES_PASSWORD: trading_password
+  #     POSTGRES_DB: trading_ai
+  #   volumes:
+  #     - postgres_data:/var/lib/postgresql/data
+  #   ports:
+  #     - "5432:5432"
+
+# volumes:
+#   postgres_data:
